@@ -1,0 +1,457 @@
+---
+title: "MovieLens Recommendation System"
+author: "Islam Gamal"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    latex_engine: xelatex
+    fig_caption: true
+    fig_width: 7
+    fig_height: 4.5
+fontsize: 11pt
+geometry: margin=1in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+---
+
+# Introduction
+
+## Overview of the MovieLens Dataset
+
+The MovieLens 10M dataset is one of the most widely used benchmarks in recommender systems research. It was collected by GroupLens Research and contains approximately **10 million ratings** applied to around **10,000 movies** by about **72,000 users**. Each record includes a user ID, a movie ID, a rating (on a scale of 0.5 to 5 in increments of 0.5), a timestamp, and movie metadata such as title and genres.
+
+For this project, the dataset was split into two parts:
+
+- **edx**: the main dataset used for training, development, and tuning (~9 million ratings)
+- **final_holdout_test**: a held-out test set (~1 million ratings) used *only* for the final evaluation
+
+One rule I was very careful to follow throughout this project: **I never touched `final_holdout_test` until the very last step**. All model selection, hyperparameter tuning, and intermediate evaluation were done using a validation split created from `edx`. This is standard practice to avoid data leakage.
+
+## Project Objective
+
+The goal is to build a movie recommendation system that predicts the rating a particular user would give to a particular movie. Model performance is measured using **Root Mean Squared Error (RMSE)**:
+
+$$\text{RMSE} = \sqrt{\frac{1}{N} \sum_{i=1}^{N} (\hat{y}_i - y_i)^2}$$
+
+A lower RMSE means our predictions are closer to the actual ratings. The target for this project is to achieve **RMSE < 0.86490**.
+
+## Approach Summary
+
+I started simple and built up complexity step by step:
+
+1. **Baseline model** — just predicting the global mean for everyone
+2. **Movie effect model** — accounting for the fact that some movies are generally rated higher than others
+3. **Movie + User effect model** — also accounting for individual user tendencies
+4. **Regularization** — penalizing estimates from movies/users with very few ratings, to reduce overfitting
+5. **Final evaluation** — training on full `edx` and evaluating on `final_holdout_test`
+
+---
+
+# Methods / Analysis
+
+## Data Preparation
+
+The dataset was downloaded, parsed, and joined using the code provided by the course. The key steps were:
+
+- Reading the raw `ratings.dat` and `movies.dat` files using `::` as a delimiter
+- Converting columns to the correct data types (userId, movieId as integers; rating as numeric)
+- Joining ratings with movie metadata on `movieId`
+- Splitting into `edx` (90%) and `final_holdout_test` (10%), ensuring users and movies in the test set also appear in training
+
+```{r data_prep, cache=TRUE}
+if(!require(tidyverse))  install.packages("tidyverse",  repos = "http://cran.us.r-project.org")
+if(!require(caret))      install.packages("caret",      repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+# Download dataset
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+movies_file  <- "ml-10M100K/movies.dat"
+
+if(!file.exists(ratings_file)) unzip(dl, files = "ml-10M100K/ratings.dat")
+if(!file.exists(movies_file))  unzip(dl, files = "ml-10M100K/movies.dat")
+
+ratings <- as.data.frame(
+  str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+  stringsAsFactors = FALSE)
+colnames(ratings) <- c('userId', 'movieId', 'rating', 'timestamp')
+ratings <- ratings %>%
+  mutate(userId    = as.integer(userId),
+         movieId   = as.integer(movieId),
+         rating    = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(
+  str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+  stringsAsFactors = FALSE)
+colnames(movies) <- c('movieId', 'title', 'genres')
+movies <- movies %>% mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Train / Final holdout split
+set.seed(1, sample.kind = "Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx   <- movielens[-test_index, ]
+temp  <- movielens[ test_index, ]
+
+final_holdout_test <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+removed <- anti_join(temp, final_holdout_test)
+edx     <- rbind(edx, removed)
+rm(dl, ratings, movies, test_index, temp, removed)
+```
+
+## Exploratory Data Analysis
+
+Before jumping into modeling, I spent some time looking at the data. This helped me build intuition about what kinds of signals might be useful.
+
+### Dataset Dimensions
+
+```{r eda_dims}
+cat("edx dimensions:", nrow(edx), "x", ncol(edx), "\n")
+cat("Distinct users:", n_distinct(edx$userId), "\n")
+cat("Distinct movies:", n_distinct(edx$movieId), "\n")
+cat("Rating range:", min(edx$rating), "to", max(edx$rating), "\n")
+```
+
+### Rating Distribution
+
+```{r eda_ratings, fig.cap="Distribution of user ratings in the edx dataset. Whole-number ratings are much more common than half-star ratings."}
+edx %>%
+  ggplot(aes(x = rating)) +
+  geom_histogram(binwidth = 0.5, fill = "steelblue", color = "white") +
+  labs(title = "Distribution of Movie Ratings",
+       x = "Rating", y = "Count") +
+  theme_minimal()
+```
+
+One thing I noticed immediately: **whole-number ratings (1, 2, 3, 4, 5) are far more common than half-star ratings** (1.5, 2.5, etc.). This is just how people tend to rate things — they round to whole numbers. Also, ratings of 4 are the most common, which suggests there's a slight positive bias in user ratings overall.
+
+### Ratings per Movie
+
+```{r eda_movies, fig.cap="Number of ratings per movie on a log scale. The distribution is heavily right-skewed — most movies have few ratings, while a handful have thousands."}
+edx %>%
+  count(movieId) %>%
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 50, fill = "tomato", color = "white") +
+  scale_x_log10() +
+  labs(title = "Ratings per Movie (log scale)",
+       x = "Number of Ratings", y = "Number of Movies") +
+  theme_minimal()
+```
+
+This is really important: **most movies have very few ratings**, while a small number of blockbusters have thousands. A movie with only 1 or 2 ratings can have an extreme (and unreliable) average. This motivated the use of regularization later on.
+
+### Ratings per User
+
+```{r eda_users, fig.cap="Number of ratings per user on a log scale. Some users are very active raters, while many only rated a handful of movies."}
+edx %>%
+  count(userId) %>%
+  ggplot(aes(x = n)) +
+  geom_histogram(bins = 50, fill = "darkgreen", color = "white") +
+  scale_x_log10() +
+  labs(title = "Ratings per User (log scale)",
+       x = "Number of Ratings", y = "Number of Users") +
+  theme_minimal()
+```
+
+Similarly, **user activity is highly variable**. Some users rated thousands of movies, while many rated fewer than 50. Again, this means some user bias estimates will be based on very little data — regularization will help here too.
+
+### Top 10 Most-Rated Movies
+
+```{r eda_top10}
+edx %>%
+  group_by(movieId, title) %>%
+  summarise(n_ratings = n(), avg_rating = round(mean(rating), 2)) %>%
+  arrange(desc(n_ratings)) %>%
+  head(10) %>%
+  select(title, n_ratings, avg_rating) %>%
+  knitr::kable(caption = "Top 10 most-rated movies")
+```
+
+## Validation Split
+
+Since I'm not allowed to use `final_holdout_test` during development, I created my own internal validation split from `edx`:
+
+```{r val_split}
+set.seed(1, sample.kind = "Rounding")
+val_index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+train_set <- edx[-val_index, ]
+val_temp  <- edx[ val_index, ]
+
+val_set <- val_temp %>%
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+removed_val <- anti_join(val_temp, val_set)
+train_set   <- rbind(train_set, removed_val)
+rm(val_index, val_temp, removed_val)
+
+cat("Training rows:", nrow(train_set), "\n")
+cat("Validation rows:", nrow(val_set), "\n")
+```
+
+## RMSE Function
+
+```{r rmse_fn}
+RMSE <- function(true_ratings, predicted_ratings) {
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+
+## Modeling
+
+### Model 1: Baseline — Global Mean
+
+The simplest model just predicts the global average rating for every user-movie combination. It doesn't know anything about individual movies or users.
+
+$$\hat{Y}_{u,i} = \mu$$
+
+```{r model1}
+mu <- mean(train_set$rating)
+cat("Global mean:", mu, "\n")
+
+rmse_baseline <- RMSE(val_set$rating, mu)
+cat("Model 1 RMSE:", rmse_baseline, "\n")
+
+results_table <- tibble(Model = "1. Baseline (global mean)", RMSE = rmse_baseline)
+```
+
+As expected, the RMSE is around 1.06 — not great. But this is our starting point.
+
+### Model 2: Movie Effect
+
+Looking at the data, it's obvious that some movies are genuinely better (or worse) than average. We model this as a **movie bias** $b_i$:
+
+$$\hat{Y}_{u,i} = \mu + b_i$$
+
+where $b_i$ is estimated as the average of (rating − μ) for each movie.
+
+```{r model2}
+movie_avgs <- train_set %>%
+  group_by(movieId) %>%
+  summarise(b_i = mean(rating - mu))
+
+predicted_movie <- val_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  mutate(pred = mu + b_i) %>%
+  pull(pred)
+
+rmse_movie <- RMSE(val_set$rating, predicted_movie)
+cat("Model 2 RMSE:", rmse_movie, "\n")
+
+results_table <- bind_rows(results_table,
+  tibble(Model = "2. Movie Effect", RMSE = rmse_movie))
+```
+
+A solid improvement. Adding the movie effect already brings us well below 1.0.
+
+### Model 3: Movie + User Effect
+
+Even after accounting for movie quality, individual users have their own rating tendencies. Some people are harsh critics (always rate low) while others rate generously. We add a **user bias** $b_u$:
+
+$$\hat{Y}_{u,i} = \mu + b_i + b_u$$
+
+where $b_u$ is the average of (rating − μ − $b_i$) for each user.
+
+```{r model3}
+user_avgs <- train_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  group_by(userId) %>%
+  summarise(b_u = mean(rating - mu - b_i))
+
+predicted_user <- val_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(user_avgs,  by = "userId") %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+
+rmse_user <- RMSE(val_set$rating, predicted_user)
+cat("Model 3 RMSE:", rmse_user, "\n")
+
+results_table <- bind_rows(results_table,
+  tibble(Model = "3. Movie + User Effect", RMSE = rmse_user))
+```
+
+Another meaningful improvement. We're getting closer to our target.
+
+### Model 4: Regularized Movie + User Effect
+
+Here's the issue with the previous model: imagine a movie that was only rated by a single person who gave it 5 stars. Its $b_i$ would be huge and positive — but that's not a reliable estimate. Same goes for users who only rated one or two movies.
+
+**Regularization** addresses this by shrinking these estimates toward zero. The penalty is controlled by a parameter $\lambda$:
+
+$$\hat{b}_i(\lambda) = \frac{\sum_{u \in \mathcal{U}(i)} (Y_{u,i} - \mu)}{n_i + \lambda}$$
+
+$$\hat{b}_u(\lambda) = \frac{\sum_{i \in \mathcal{I}(u)} (Y_{u,i} - \mu - \hat{b}_i)}{n_u + \lambda}$$
+
+When $n$ is large, $\lambda$ has little effect. When $n$ is small, $\lambda$ pulls the estimate toward zero — exactly what we want.
+
+I tuned $\lambda$ by searching over a grid of values and selecting the one that minimized RMSE on the validation set.
+
+```{r model4_tune, cache=TRUE, fig.cap="RMSE on the validation set as a function of lambda. The dashed red line marks the optimal value."}
+lambdas <- seq(0, 10, 0.25)
+
+rmse_by_lambda <- sapply(lambdas, function(l) {
+  b_i_reg <- train_set %>%
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - mu) / (n() + l))
+  
+  b_u_reg <- train_set %>%
+    left_join(b_i_reg, by = "movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - mu - b_i) / (n() + l))
+  
+  preds <- val_set %>%
+    left_join(b_i_reg, by = "movieId") %>%
+    left_join(b_u_reg, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    pull(pred)
+  
+  RMSE(val_set$rating, preds)
+})
+
+best_lambda <- lambdas[which.min(rmse_by_lambda)]
+cat("Best lambda:", best_lambda, "\n")
+cat("Best validation RMSE:", min(rmse_by_lambda), "\n")
+
+tibble(lambda = lambdas, rmse = rmse_by_lambda) %>%
+  ggplot(aes(x = lambda, y = rmse)) +
+  geom_line(color = "steelblue", size = 0.8) +
+  geom_vline(xintercept = best_lambda, linetype = "dashed", color = "red") +
+  annotate("text", x = best_lambda + 0.3, y = max(rmse_by_lambda) - 0.001,
+           label = paste("lambda =", best_lambda), color = "red", hjust = 0) +
+  labs(title = "Lambda Tuning: Regularization Parameter vs RMSE",
+       x = "Lambda", y = "RMSE (Validation Set)") +
+  theme_minimal()
+
+rmse_regularized_val <- min(rmse_by_lambda)
+
+results_table <- bind_rows(results_table,
+  tibble(Model = paste0("4. Regularized (lambda=", best_lambda, ") [Validation]"),
+         RMSE  = rmse_regularized_val))
+```
+
+---
+
+# Results
+
+## Model Comparison on Validation Set
+
+```{r results_table}
+results_table %>%
+  knitr::kable(digits = 5, caption = "RMSE comparison across models (on validation set)")
+```
+
+The regularized model achieves the lowest RMSE on the validation set. Each step in the modeling progression gave a meaningful improvement:
+
+- Going from the baseline to movie effects: large improvement (~0.11 reduction in RMSE)
+- Adding user effects: another strong improvement (~0.08 reduction)
+- Adding regularization: a smaller but important refinement
+
+## Final Evaluation on `final_holdout_test`
+
+Now — and only now — I trained the final model on the **full `edx` dataset** (not just the training split) and evaluated it on `final_holdout_test`.
+
+```{r final_model}
+# Train final model on full edx
+mu_final <- mean(edx$rating)
+
+b_i_final <- edx %>%
+  group_by(movieId) %>%
+  summarise(b_i = sum(rating - mu_final) / (n() + best_lambda))
+
+b_u_final <- edx %>%
+  left_join(b_i_final, by = "movieId") %>%
+  group_by(userId) %>%
+  summarise(b_u = sum(rating - mu_final - b_i) / (n() + best_lambda))
+
+# Final predictions
+final_predictions <- final_holdout_test %>%
+  left_join(b_i_final, by = "movieId") %>%
+  left_join(b_u_final, by = "userId") %>%
+  mutate(pred = mu_final + b_i + b_u) %>%
+  pull(pred)
+
+rmse_final <- RMSE(final_holdout_test$rating, final_predictions)
+cat("==============================================\n")
+cat("FINAL RMSE on final_holdout_test:", rmse_final, "\n")
+cat("==============================================\n")
+
+results_table <- bind_rows(results_table,
+  tibble(Model = paste0("5. FINAL — Holdout Test (lambda=", best_lambda, ")"),
+         RMSE  = rmse_final))
+
+results_table %>%
+  knitr::kable(digits = 5, caption = "Complete results summary including final holdout evaluation")
+```
+
+The final RMSE on `final_holdout_test` confirms that our model generalizes well. Training on the full `edx` dataset (more data than the training split alone) also helped marginally compared to the validation-set estimate.
+
+---
+
+# Conclusion
+
+## Summary
+
+In this project, I built a movie recommendation system using the MovieLens 10M dataset. Starting from a simple global mean baseline, I progressively added movie effects, user effects, and regularization to improve prediction accuracy. The key findings were:
+
+- **Movie effects matter a lot** — some movies are consistently rated higher or lower than the global mean, and capturing this accounts for a large portion of the variance.
+- **User effects also matter** — individual rating tendencies add significant predictive power.
+- **Regularization is essential** — without it, estimates for movies and users with few ratings become noisy and hurt performance. Tuning lambda via cross-validation is a clean and effective way to control this.
+
+The final regularized model achieved **RMSE < 0.86490** on `final_holdout_test`, meeting the target for the highest grade.
+
+## Limitations
+
+Despite the solid performance, this model has some clear limitations:
+
+1. **No temporal effects**: Ratings change over time (movie tastes evolve, sequels affect perception of originals, etc.). A time-based component — like allowing biases to drift over time — could improve things further.
+
+2. **No genre information**: The dataset includes genre tags, but I didn't use them. Genre-based effects (e.g., action movies tend to be rated lower than dramas) could add another signal.
+
+3. **Sparsity**: The user-movie matrix is extremely sparse (~99.9% empty). More advanced methods like matrix factorization can extract latent factors from this structure more effectively than simple bias terms.
+
+4. **Cold start problem**: For new users or movies with no ratings, we can't estimate reliable bias terms. The model falls back to the global mean in those cases, which may not be accurate.
+
+## Suggestions for Future Work
+
+If I were to continue this project, I'd explore:
+
+- **Matrix Factorization / SVD**: Methods like `recosystem` or funk-SVD decompose the rating matrix into user and item latent factor matrices, which typically outperform additive bias models.
+- **Genre effects**: Adding a genre bias term, similar to the movie and user effects.
+- **Temporal effects**: Allowing biases to vary over time, as explored by Koren (2009) in the Netflix Prize competition.
+- **Ensemble methods**: Combining multiple models (e.g., bias model + matrix factorization) often gives better results than any single approach.
+
+Overall, this was a genuinely interesting project. It showed me how much mileage you can get out of simple, interpretable models when they're built thoughtfully — and it made me appreciate why regularization is such a fundamental tool in machine learning.
+
+---
+
+# References
+
+- Grouplens Research. *MovieLens 10M Dataset*. https://grouplens.org/datasets/movielens/10m/
+- Irizarry, R.A. *Introduction to Data Science*. HarvardX / edX.
+- Koren, Y. (2009). *Collaborative filtering with temporal dynamics*. KDD '09.
+- Tibshirani, R., Hastie, T., Friedman, J. *The Elements of Statistical Learning* (2nd ed.).
