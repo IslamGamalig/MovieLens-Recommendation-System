@@ -1,98 +1,94 @@
-# 🎬 Movie Recommendation System (HarvardX Capstone)
+# Movie Recommendation System (HarvardX Capstone)
 
-This project is part of the **HarvardX Data Science Professional Certificate (PH125.9x Capstone)**.  
-The goal is to build a movie recommendation system using the **MovieLens 10M dataset** and evaluate performance using RMSE.
+This project was completed as part of the HarvardX Data Science Professional Certificate (PH125.9x Capstone). The goal is to build a movie recommendation system using the MovieLens 10M dataset and evaluate its performance using Root Mean Squared Error (RMSE).
 
----
+## Project Overview
 
-## 🚀 Project Overview
+The objective of this project is to predict the rating a user would give to a movie. The model was developed step by step, starting from a simple baseline and gradually improving performance by incorporating additional factors such as movie effects, user effects, and regularization.
 
-In this project, I developed a recommendation system that predicts user ratings for movies by progressively improving model performance:
+The final model achieved an RMSE below 0.86490 on the held-out test set, meeting the course requirement.
 
-- Baseline model (global mean)
-- Movie effect model
-- Movie + User effects model
-- Regularized model (L2 regularization)
+## Dataset
 
-The final model successfully achieved the required performance target.
-
-📊 **Final Result:**  
-RMSE < **0.86490** ✅ (Target achieved)
-
----
-
-## 📂 Dataset
-
-- **Dataset:** MovieLens 10M  
-- ~10 million ratings  
-- ~72,000 users  
-- ~10,000 movies  
-- Ratings scale: 0.5 – 5.0  
+The project uses the MovieLens 10M dataset, which contains:
+- Approximately 10 million ratings
+- Around 72,000 users
+- Around 10,000 movies
+- Ratings ranging from 0.5 to 5.0
 
 The dataset was split into:
-- `edx` (training set)
-- `final_holdout_test` (test set)
+- edx: used for training and validation
+- final_holdout_test: used only once for final evaluation
 
----
+## Methodology
 
-## ⚙️ Methodology
+### Data Preparation
+The raw data was processed and merged into a single dataset containing user IDs, movie IDs, ratings, and timestamps. Care was taken to ensure consistency between training and test sets.
 
-### 1. Data Preparation
-- Data cleaning and transformation
-- Merging ratings with movie metadata
+### Exploratory Data Analysis
+Initial analysis showed:
+- Ratings are skewed toward higher values (mostly 3 to 5)
+- Some movies have many ratings while most have very few
+- User activity varies significantly
 
-### 2. Exploratory Data Analysis
-- Rating distribution analysis
-- User & movie activity patterns
-- Sparsity analysis
+These observations guided the modeling decisions.
 
-### 3. Modeling Approach
+### Modeling Approach
 
-The model was built incrementally:
+The model was built in stages:
 
-#### 🔹 Baseline Model
-Predicts global mean rating
+1. Baseline Model  
+Predicts the global average rating for all user-movie pairs.
 
-#### 🔹 Movie Effect
-Captures movie-specific bias
+2. Movie Effect Model  
+Adds a movie-specific bias to account for differences in movie quality.
 
-#### 🔹 User Effect
-Captures user rating behavior
+3. Movie and User Effects Model  
+Adds a user-specific bias to capture individual rating behavior.
 
-#### 🔹 Regularization
-Applies L2 regularization to handle sparsity
+4. Regularized Model  
+Applies L2 regularization to improve stability, especially for movies and users with few ratings.
 
----
+## Model Performance
 
-## 📈 Model Performance
+The performance improved at each step:
 
-| Model | RMSE |
-|------|------|
-| Baseline | 1.06020 |
-| Movie Effect | 0.94374 |
-| Movie + User | 0.86535 |
-| Regularized Model | **0.86481** |
+- Baseline: 1.06020  
+- Movie effect: 0.94374  
+- Movie + user effects: 0.86535  
+- Regularized model: 0.86481  
 
-📉 Continuous improvement achieved at each stage.
+Final result on test set: RMSE below 0.86490
 
----
+## Key Insights
 
-## 🧠 Key Insights
+- Movie-specific effects contributed the most to improving accuracy
+- User behavior patterns further refined predictions
+- Regularization helped reduce overfitting caused by sparse data
+- A simple and well-structured model can achieve strong results
 
-- Movie bias had the largest impact on performance  
-- User behavior significantly improved predictions  
-- Regularization stabilized results for sparse data  
-- Simple models can achieve strong results with good feature engineering  
+## Tools and Technologies
 
----
-
-## 🛠️ Tech Stack
-
-- **R**
+- R
 - tidyverse
 - caret
 - data.table
 
----
+## Project Structure
 
-## 📁 Project Structure
+- 0-movielens_islam_gamal.Rmd  
+- 1-movielens_islam_gamal.R  
+- 2-movielens_report_islam_gamal.pdf  
+
+Full report is included in the repository with detailed analysis and results.
+
+## Conclusion
+
+This project shows that combining exploratory data analysis with a structured modeling approach can lead to effective and reliable recommendation systems. The final model is simple, interpretable, and performs well on unseen data.
+
+## Contact
+
+Islam Gamal  
+LinkedIn: https://www.linkedin.com/in/islamgamalig
+
+Open to opportunities in data science and machine learning.
